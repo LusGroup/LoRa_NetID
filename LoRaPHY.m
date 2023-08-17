@@ -47,7 +47,7 @@ classdef LoRaPHY  < handle & matlab.mixin.Copyable
             self.Fs = Fs;
             self.BW = BW;
             self.Ts = 2^(SF)/BW;
-            self.zero_padding_ratio = 1;
+            self.zero_padding_ratio = 10;
             
             self.has_header = 1;
             self.CR = 1;
@@ -363,8 +363,8 @@ classdef LoRaPHY  < handle & matlab.mixin.Copyable
             netid_m = [];
             x = 1;
             while x < length(self.sig)
-%                 x = self.detect(x);  
-                x = self.pre_detect(x);
+                x = self.detect(x);  
+%                 x = self.pre_detect(x);
                 % 画出 detect 到的点的时频图
 %                 LoRaPHY.plot_timefrequency(self.sig(x:x+10*self.sample_num_per_symbol),self.Fs,self.SF,self.BW);
                 if x < 0
@@ -837,33 +837,34 @@ classdef LoRaPHY  < handle & matlab.mixin.Copyable
             self.print_bin("Dewhiten", bytes_w);
         end
 
-        function pk = pre_dechirp(self, x, is_up)
+        function pk = pre_dechirp(self, x)
             % 该函数用于 preamble 部分的dechirp，固定用两个解调窗口进行dechirp
             % dechirp 使用的 base up-/down-chirp 与一个解调窗口的相比，k不变，Ts*2
-            if nargin == 3 && ~is_up
-                c = LoRaPHY.chirp(true,self.SF+2,2*self.BW,self.Fs,0);
-            else
-                c = LoRaPHY.chirp(false,self.SF+2,2*self.BW,self.Fs,0);
-            end
-            ft = fft(self.sig(x:x+self.sample_num_per_symbol*2-1).*c, self.fft_len*2);
-            ft_ = abs(ft);
-%             ft_ = abs(ft(1:self.bin_num*2)) + abs(ft(self.fft_len*2-self.bin_num*2+1:self.fft_len*2)); 
+            upchirp = LoRaPHY.chirp(true,self.SF+2,2*self.BW,self.Fs,0);
+            downchirp = LoRaPHY.chirp(false,self.SF+2,2*self.BW,self.Fs,0);
+           
+            ft_up = fft(self.sig(x:x+self.sample_num_per_symbol*2-1).*upchirp, self.fft_len*2);
+            ft_up_ = abs(ft_up);
+            ft_down = fft(self.sig(x:x+self.sample_num_per_symbol*2-1).*downchirp, self.fft_len*2);
+            ft_down_ = abs(ft_down);
             % --- DEBUG ---
             if true
                 signal = self.sig(x:x+self.sample_num_per_symbol*2-1);
                 LoRaPHY.plot_timefrequency(signal,self.Fs,self.SF,self.BW);
                 title("解调窗口的信号时频图");
-                LoRaPHY.plot_timefrequency(c,self.Fs,self.SF,self.BW);
+                LoRaPHY.plot_timefrequency(upchirp,self.Fs,self.SF,self.BW);
+                title("dechirp使用的base chirp的时频图");
+                LoRaPHY.plot_timefrequency(downchirp,self.Fs,self.SF,self.BW);
                 title("dechirp使用的base chirp的时频图");
                 
                 figure;
                 subplot(211);
-                plot(ft_);
-                title("preamble使用两个解调窗口的FFT结果图(折叠前)");
+                plot(ft_up_);
+                title("preamble使用两个解调窗口的FFT结果图(base upchirp)");
                 xlabel('bin');
                 subplot(212);
-                plot(ft_);
-                title("preamble使用两个解调窗口的FFT结果图(折叠后)");
+                plot(ft_down_);
+                title("preamble使用两个解调窗口的FFT结果图(base downchirp)");
                 xlabel('bin');
             end
             pk = LoRaPHY.topn([ft_ (1:self.fft_len*2).'], 1);
