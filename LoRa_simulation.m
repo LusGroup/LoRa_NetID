@@ -24,7 +24,7 @@ sig = phy.modulate(symbols);
 % sig = [pre;sig;pre];
 
 % save sig to file 
-filename =  "../sig/lora_packet.cfile";
+filename =  "lora_packet.cfile";
 LoRaPHY.write(sig,filename);
 
 % read sig from file

@@ -30,17 +30,27 @@ classdef LoRaPHY  < handle & matlab.mixin.Copyable
         
         Ref_upchirp                % 参考base upchirp
         Ref_downchirp              % 参考base downchirp
+        Ref_pk_bin_list            % 参考fft bin list
         
         sig                        % 输入的基带信号
         
         m_n_up_req
         os_factor                  % fs/bw的比值
+
+        pattern                    % 前导码的形式
+        pattern_bin_list           % 前导码对应的fft bin
         
     end
 
     methods
      
-        function self = LoRaPHY(C_freq,SF,BW,Fs)
+        function self = LoRaPHY(C_freq,SF,BW,Fs,pattern)
+
+            if nargin < 5
+                self.pattern = [];
+            else
+                self.pattern = pattern;
+            end
         
             self.C_freq = C_freq;
             self.SF = SF;
@@ -56,7 +66,7 @@ classdef LoRaPHY  < handle & matlab.mixin.Copyable
             self.hamming_decoding_en = true;
             self.fast_mode = false;
             self.CFO = 0;
-            
+            self.pattern_bin_list = [];
             
             self.Whitening_seq = uint8([
                 0xFF, 0xFE, 0xFC, 0xF8, 0xF0, 0xE1, 0xC2, 0x85, 0x0B, 0x17, 0x2F, 0x5E, 0xBC, 0x78, 0xF1, 0xE3, ...
@@ -98,6 +108,17 @@ classdef LoRaPHY  < handle & matlab.mixin.Copyable
             
             self.Ref_upchirp = LoRaPHY.chirp(true,self.SF,self.BW,2*self.BW,0,self.CFO,0);
             self.Ref_downchirp = LoRaPHY.chirp(false,self.SF,self.BW,2*self.BW,0,self.CFO,0);
+            self.Ref_pk_bin_list = [];
+            fft_resolution = 1/(2*self.Ts)/self.zero_padding_ratio;
+            up_fft_bin = self.BW/2/fft_resolution;
+            down_fft_bin = 3*self.BW/2/fft_resolution;
+            for i = 1:length(self.pattern)
+                if (self.pattern(i) == 1)
+                    self.Ref_pk_bin_list = [self.Ref_pk_bin_list up_fft_bin];
+                else
+                    self.Ref_pk_bin_list = [self.Ref_pk_bin_list down_fft_bin];
+                end
+            end
             % Low Data Rate Optimization (LDRO) mode in LoRa
             % If the chirp peird is larger than 16ms, the least significant
             % two bits are considered unreliable and are neglected.
@@ -364,16 +385,22 @@ classdef LoRaPHY  < handle & matlab.mixin.Copyable
             x = 1;
             while x < length(self.sig)
                 x = self.detect(x);  
-%                 x = self.pre_detect(x);
+                % x = self.pre_detect(x);
                 % 画出 detect 到的点的时频图
 %                 LoRaPHY.plot_timefrequency(self.sig(x:x+10*self.sample_num_per_symbol),self.Fs,self.SF,self.BW);
                 if x < 0
                     break;
                 end
+
+                % 用于调试此时解调窗口位于解码的哪一部分
+                if false
+                    signal = self.sig(x:x+self.sample_num_per_symbol*2-1);
+                    LoRaPHY.plot_timefrequency(signal,self.Fs,self.SF,self.BW);
+                end
                 
                 % align symbols with SFD
                 x = self.sync(x);
-                
+                % x = self.pre_sync(x);
                 %NetId
                 pk_netid1 = self.dechirp(round(x - 4.25 * self.sample_num_per_symbol));
                 pk_netid2 = self.dechirp(round(x - 3.25 * self.sample_num_per_symbol));
@@ -433,28 +460,116 @@ classdef LoRaPHY  < handle & matlab.mixin.Copyable
             % Detect new form preamble 
             ii = start_idx;
             pk_bin_list = [];
+            tmp_pattern_bin_list = [];
+            self.pattern_bin_list = [];
             while ii < length(self.sig)-self.sample_num_per_symbol*self.preamble_len
-                if length(pk_bin_list) == self.preamble_len-1
-                    x = ii;
-                    return;
-                end
                 pk0 = self.pre_dechirp(ii);
-                if ~isempty(pk_bin_list)
-                    bin_diff = mod(pk_bin_list(end)-pk0(2), self.bin_num*2);
-                    if bin_diff > self.bin_num/2
-                        bin_diff = self.bin_num - bin_diff; %考虑 bin_diff是负数的情况
-                    end
-                    if bin_diff <= self.zero_padding_ratio
-                        pk_bin_list = [pk_bin_list; pk0(2)];
-                    else
-                        pk_bin_list = pk0(2);
-                    end
+                if size(pk_bin_list,2) < self.preamble_len
+                    % 如果现在没有存够 6 个preamble chirp，则继续
+                    % 否则追加到 pk_bin_list 中，并保持 pk_bin_list 的长度为8
+                    pk_bin_list = [pk_bin_list pk0(:,2)];
                 else
-                    pk_bin_list = pk0(2);
+                    % 如果已经存够 6 个 preamble chirp,则检查是否是Preamble，若不是则追加
+                    for i = 1:length(self.pattern)
+                        row = self.pattern(i);
+                        pk_bin = pk_bin_list(row,i);
+                        self.pattern_bin_list = [self.pattern_bin_list pk_bin];
+                    end
+                    % 计算按照给定的 pattern 取出的bin_list，差值是否小于 2*padding
+
+                    tmp_pattern_bin_list = self.pattern_bin_list - self.Ref_pk_bin_list;
+                    tmp_pattern_bin_list = abs(tmp_pattern_bin_list);
+                    found = false;
+                    bin_diff = diff(tmp_pattern_bin_list);
+                    if any(abs(bin_diff) > self.zero_padding_ratio*2) 
+                        found = false;
+                    else
+                        found = true;
+                    end
+                    if found == true
+                        warning('preamble detected!');
+                        x = ii;
+                        return;
+                    else
+                        pk_bin_list(:,1) = [];
+                        pk_bin_list = [pk_bin_list pk0(:,2)];
+                        self.pattern_bin_list = [];
+                    end                    
                 end
                 ii = ii + self.sample_num_per_symbol;
             end
             x = -1;
+        end
+
+        function x_sync = pre_sync(self, x)
+            % 功能：根据 pk_bin_list 求CFO和STO
+            % inputs：
+            %       pk_bin_list : {preamble + SFD} FFT bin
+            
+            up_pk_bin = 0;
+            down_pk_bin = 0;
+         
+            if all(self.pattern == 1)
+                up_pk_bin = mean(self.pattern_bin_list);
+            elseif all(self.pattern == 2)
+                down_pk_bin = mean(self.pattern_bin_list);
+            else
+                up_cnt = 0;
+                down_cnt = 0;
+                for i = 1:length(self.pattern)
+                    if self.pattern(i) == 1
+                        up_pk_bin = up_pk_bin + self.pattern_bin_list(i);
+                        up_cnt = up_cnt + 1;
+                    else
+                        down_pk_bin = down_pk_bin + self.pattern_bin_list(i);
+                        down_cnt = down_cnt + 1;
+                    end
+                end
+                up_pk_bin = up_pk_bin/up_cnt;
+                down_pk_bin = down_pk_bin/down_cnt;
+            end
+ 
+            cfo_offset = mod((up_pk_bin+down_pk_bin),self.fft_len*2)/2;
+            
+            % get -BW/2 corresponding fft bin
+            fft_resolution = 1/(2*self.Ts)/self.zero_padding_ratio;
+            Ref_down_bin = 3*self.BW/2/fft_resolution;
+            
+            % 根据 Bernier的论文，这种方式估计的cfo的范围在[−BW/4,BW/4]
+%             if abs(cfo_offset) > self.bin_num/4
+%                 if cfo_offset < 0
+%                     cfo_offset = cfo_offset + self.bin_num/2;
+%                 else
+%                     cfo_offset = cfo_offset - self.bin_num/2;
+%                 end
+%             end
+            
+            self.preamble_bin = cfo_offset;
+
+            sto_offset = round((down_pk_bin-cfo_offset-Ref_down_bin)/self.zero_padding_ratio);
+            
+%             if self.preamble_bin > self.bin_num / 2
+%                 self.CFO = (self.preamble_bin-self.bin_num)*self.BW/self.bin_num;
+%             else
+%                 self.CFO = (self.preamble_bin)*self.BW/self.bin_num;
+%             end
+             
+            % set x to the start of data symbols
+%             pku = self.dechirp(x-2*self.sample_num_per_symbol+sto_offset);
+%             pkd = self.dechirp(x-2*self.sample_num_per_symbol+sto_offset, false);
+%             if abs(pku(1)) > abs(pkd(1))
+%                 % current symbol is the first downchirp
+%                 x_sync = x + round(2.25*self.sample_num_per_symbol) + sto_offset;
+%             else
+%                 % current symbol is the second downchirp
+%                 x_sync = x + round(1.25*self.sample_num_per_symbol) + sto_offset;
+%             end
+            x_sync = x + round(2.25*self.sample_num_per_symbol) + sto_offset;
+            if false
+                sync = self.sig(x_sync:x_sync+10*self.sample_num_per_symbol);
+                LoRaPHY.plot_timefrequency(sync,self.Fs,self.SF,self.BW);
+                title("对齐之后，此时采样窗口的地方（位于第一个payload chirp)");
+            end
         end
 
         function x = detect(self, start_idx)
@@ -840,6 +955,11 @@ classdef LoRaPHY  < handle & matlab.mixin.Copyable
         function pk = pre_dechirp(self, x)
             % 该函数用于 preamble 部分的dechirp，固定用两个解调窗口进行dechirp
             % dechirp 使用的 base up-/down-chirp 与一个解调窗口的相比，k不变，Ts*2
+
+            % output : [bin_value  bin_index ]
+            %          其中第一行使用 downchirp 进行解码
+            %             第二行使用 upchirp 进行解码
+            %              bin_value = -1 代表是没有peak
             upchirp = LoRaPHY.chirp(true,self.SF+2,2*self.BW,self.Fs,0);
             downchirp = LoRaPHY.chirp(false,self.SF+2,2*self.BW,self.Fs,0);
            
@@ -848,26 +968,50 @@ classdef LoRaPHY  < handle & matlab.mixin.Copyable
             ft_down = fft(self.sig(x:x+self.sample_num_per_symbol*2-1).*downchirp, self.fft_len*2);
             ft_down_ = abs(ft_down);
             % --- DEBUG ---
-            if true
+            if false
                 signal = self.sig(x:x+self.sample_num_per_symbol*2-1);
                 LoRaPHY.plot_timefrequency(signal,self.Fs,self.SF,self.BW);
                 title("解调窗口的信号时频图");
-                LoRaPHY.plot_timefrequency(upchirp,self.Fs,self.SF,self.BW);
-                title("dechirp使用的base chirp的时频图");
-                LoRaPHY.plot_timefrequency(downchirp,self.Fs,self.SF,self.BW);
-                title("dechirp使用的base chirp的时频图");
+%                 LoRaPHY.plot_timefrequency(upchirp,self.Fs,self.SF,self.BW);
+%                 title("dechirp使用的base chirp的时频图");
+%                 LoRaPHY.plot_timefrequency(downchirp,self.Fs,self.SF,self.BW);
+%                 title("dechirp使用的base chirp的时频图");
                 
                 figure;
                 subplot(211);
                 plot(ft_up_);
-                title("preamble使用两个解调窗口的FFT结果图(base upchirp)");
+                title("preamble使用两个解调窗口的FFT结果图(使用upchirp)");
                 xlabel('bin');
                 subplot(212);
                 plot(ft_down_);
-                title("preamble使用两个解调窗口的FFT结果图(base downchirp)");
+                title("preamble使用两个解调窗口的FFT结果图(使用downchirp)");
                 xlabel('bin');
             end
-            pk = LoRaPHY.topn([ft_ (1:self.fft_len*2).'], 1);
+            is_Outlier_up = LoRaPHY.hasOutlier([ft_up_ (1:self.fft_len*2).']);
+            is_Outlier_down = LoRaPHY.hasOutlier([ft_down_ (1:self.fft_len*2).']);
+            if is_Outlier_up == is_Outlier_down
+                % 如果在down/up-demodulation window 中均存在离群点或均不存在离群点时，
+                % 则此时存在解调窗口存在 upchirp和downchirp，那么则各自取peak
+                pk_up = LoRaPHY.topn([ft_up_ (1:self.fft_len*2).'], 1);
+                pk_down = LoRaPHY.topn([ft_down_ (1:self.fft_len*2).'], 1);
+            end
+            if is_Outlier_up && ~is_Outlier_down
+                % 如果在up-demodulation window 中存在离群点
+                % 在 down-demodulation window 中不存在离群点
+                % 则 此时解调窗口存在两个downchirp，
+                % 如果则合法的peak应该出现在[3B/2,2B]处
+                pk_down = [-1 -1]; 
+                pk_up = LoRaPHY.topn([ft_up_(3*self.fft_len/2:self.fft_len*2) (3*self.fft_len/2:self.fft_len*2).'], 1);
+            end
+            if ~is_Outlier_up && is_Outlier_down
+               % 如果在down-demodulation window 中存在离群点
+               % 在 up-demodulation window 中不存在离群点
+               % 则 此时解调窗口存在两个upchirp，
+               % 如果则合法的peak应该出现在[1,B/2]处
+               pk_up = [-1 -1]; 
+               pk_down = LoRaPHY.topn([ft_down_(1:self.fft_len/2) (1:self.fft_len/2).'], 1);
+            end
+            pk = [pk_down;pk_up];
         end
 
         function pk = dechirp(self, x, is_up)
@@ -1064,6 +1208,23 @@ classdef LoRaPHY  < handle & matlab.mixin.Copyable
             fclose (f);
             end
         end
+        function outlier = hasOutlier(pks)
+            
+            % 计算均值和方差
+            data = abs(pks(:,1));
+            mean_val = mean(data);
+            var_val = std(data);
+            threshold = mean_val + 5*var_val;
+            outlier_idx = find(data > threshold); % 返回离群点的idx
+            if isempty(outlier_idx)
+                outlier = false;
+            else
+                outlier = true;
+            end
+                
+
+        end
+
         function y = topn(pks, n, padding, th)
         %             input:
         %                 fft_res : fft的结果

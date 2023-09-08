@@ -21,7 +21,11 @@ symbols = phy.encode(data.');
 uc = LoRaPHY.chirp(true,sf,bw,fs,0,0);
 dc = LoRaPHY.chirp(false,sf,bw,fs,0,0);
 
-preamble = [uc;dc;uc;dc;uc;dc;uc;dc];
+preamble = [uc;dc;uc;dc;uc;dc]; % 上下
+% preamble = [uc;uc;uc;dc;uc;dc;]; % 上上上下上下  111212
+% preamble = [dc;uc;dc;uc;dc;uc;]; % 下上交替 2 1 2 1 2 1
+% preamble = [dc;dc;dc;uc;uc;dc]; % 2 2 2 1 1 2
+
 % netid = [LoRaPHY.chirp(true,sf,bw,fs,8,0);LoRaPHY.chirp(true,sf,bw,fs,16,0);];
 chirp_len = length(uc);
 sfd = [dc; dc; dc(1:round(chirp_len/4))];
@@ -33,8 +37,9 @@ end
 sig = [preamble;sfd; data];
 % LoRa_Analyse.plot_timefrequency(sig,phy.Fs,phy.SF,phy.BW);
 % 在signal前后加一些底噪
-% pre = zeros(5.25*phy.sample_num_per_symbol,1);
-% pre = awgn(pre,10,0);
-% sig = [pre;sig;pre];
+pre = zeros(round(1.2*phy.sample_num_per_symbol),1);
+pre = awgn(pre,10,0);
+sig = [pre;sig;pre];
+sig_ = awgn(sig,-12);
 filename =  "../sig/ud_pre_packet.cfile";
-LoRa_Analyse.write(sig,filename);
+LoRa_Analyse.write(sig_,filename);
